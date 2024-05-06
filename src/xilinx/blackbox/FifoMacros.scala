@@ -3,8 +3,7 @@ package hwlib.xilinx.blackbox
 import spinal.core._
 
 
-/*
-case class DistRamMacroConfig(
+case class FifoMacroConfig(
     putDepth          : Int,
     putBits           : Int,
     getBits           : Int,
@@ -79,9 +78,24 @@ case class DistRamMacroConfig(
   val advFeatures = f"$advFeatureBits%04x"
 }
 
-class DistRamMacro(val cfg : DistRamMacroConfig) extends BlackBox {
+class FifoMacro(val cfg : FifoMacroConfig,
+                val putClock : ClockDomain = null,
+                val getClock : ClockDomain = null) extends BlackBox {
+  val wrDomain = if (null != putClock) {
+    putClock
+  } else {
+    ClockDomain.current
+  }
 
-  val macroName = "xpm_memory_dpdistram"
+  val rdDomain = if (null != getClock) {
+    getClock
+  } else {
+    ClockDomain.current
+  }
+
+  val isAsync = rdDomain != wrDomain
+
+  val macroName = if (isAsync) { "xpm_fifo_async" } else { "xpm_fifo_sync" }
   if (globalData.config.mode == VHDL) {
     librariesUsages += "xpm"
     setDefinitionName(s"vcomponents.${macroName}")
@@ -89,6 +103,14 @@ class DistRamMacro(val cfg : DistRamMacroConfig) extends BlackBox {
     setDefinitionName(macroName)
   }
 
+  if (isAsync) {
+    // CDC_SYNC_STAGES (2..8) *2 !ASYNC ONLY
+    addGeneric("CDC_SYNC_STAGES", cfg.syncStages)
+    // RELATED_CLOCKS (0, 1) *0 !ASYNC_ONLY // TODO-lw detect if clocks are related...
+    addGeneric("RELATED_CLOCKS", (if (cfg.related) {1} else {0}))
+  }
+  // SIM_ASSERT_CHK (0, 1) *0
+  addGeneric("SIM_ASSERT_CHK", (if (cfg.simAssert) {1} else {0}))
 
   // DOUT_RESET_VALUE Bits
   // FULL_RESET_VALUE Bool
@@ -141,27 +163,11 @@ class DistRamMacro(val cfg : DistRamMacroConfig) extends BlackBox {
   // WR_DATA_COUNT_WIDTH (1 .. 23) * 1
   addGeneric("WR_DATA_COUNT_WIDTH", cfg.writeCountBits)
 
-  /////////////////////
-
-  addGeneric("CLOCKING_MODE", "common_clocks");
-
-  def TAAddr = Bits(addrBitsA bits)
-  def TBAddr = Bits(addrBitsB bits)
-
-  def TAData = Bits(dataBitsA bits)
-  def TBData = Bits(dataBitsB bits)
-
   val io = new Bundle {
-    val clk = in(Bool)
-    val rst = in(Bool)
+    val wr_clk = in(Bool)
+    val rst    = in(Bool) default False   // wr_clk
 
-    val iAAddr =  in(TAAddr)
-    val iAData =  in(TAData)
-    val iAWrEn =  in(Bool)
-    val oAData = out(TAData)
-
-    val iBAddr =  in(TBAddr)
-    val oBData = out(TBData)
+    val rd_clk = isAsync generate in(Bool)
 
     val oPutInReset   = out(Bool)         // wr_clk
     val iPutData      =  in(cfg.TWrData)  // wr_clk
@@ -223,4 +229,32 @@ class DistRamMacro(val cfg : DistRamMacroConfig) extends BlackBox {
   noIoPrefix()
   addTag(noNumericType)
 }
-*/
+
+
+class Fifo[T <: Data](tPayload : HardType[T], logDepth : Int, putClock : ClockDomain = null, getClock : ClockDomain = null) extends Component {
+  require(logDepth > 0)
+
+  val dataBits = widthOf(tPayload())
+  val cfg = FifoMacroConfig(1 << logDepth, dataBits, dataBits, readLatency = 0)
+
+  val io = new Bundle {
+    val iPutData  =  in(tPayload())
+    val iPutValid =  in(Bool)
+    val oPutReady = out(Bool)
+
+    val oGetData  = out(tPayload())
+    val oGetValid = out(Bool)
+    val iGetReady =  in(Bool)
+  }
+
+  val iMacro = new FifoMacro(cfg, putClock, getClock)
+
+  iMacro.io.iPutData := io.iPutData.asBits
+  iMacro.io.iPutEnable := !iMacro.io.oPutInReset && io.iPutValid && !iMacro.io.oPutFull
+  io.oPutReady := !iMacro.io.oPutInReset && !iMacro.io.oPutFull
+
+  io.oGetData.assignFromBits(iMacro.io.oGetData)
+  io.oGetValid := !iMacro.io.oGetInReset && !iMacro.io.oGetEmpty
+  iMacro.io.iGetEnable := !iMacro.io.oGetInReset && io.iGetReady && !iMacro.io.oGetEmpty
+
+}

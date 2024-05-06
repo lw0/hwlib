@@ -7,7 +7,7 @@ import spinal.lib._
 import spinal.lib.fsm._
 import spinal.core.sim._
 
-import hwlib.base.{MemoryPortConfig, TMemoryPort, MemoryPortRead, MemoryPortWrite, MemoryPortBoth}
+import hwlib.base.{MemoryPortConfig, TMemoryPort, MemoryPortRead, MemoryPortWrite, MemoryPortBoth, MaskMux}
 import hwlib.amba.{AxiConfig, TAxi, AxiStreamConfig, TAxiStream, ApbConfig, TApb}
 import hwlib.HwMain
 import hwlib.sim._
@@ -49,15 +49,15 @@ class AxiMemInterface(val cfg : AxiConfig,
 
   val iReadLogic = canRead generate new Area {
     val sGenActive = Bool
-    val sGenAddr = cfg.TWAddr
-    val sGenStep  = Bool
-    val sGenLast  = Bool
-    val sGenError = Bool
-    val sGenNext  = Bool
+    val sGenAddr   = cfg.TWAddr
+    val sGenStep   = Bool
+    val sGenLast   = Bool
+    val sGenError  = Bool
+    val sGenNext   = Bool
 
-    val sPortAddr = cfg.TWAddr
-    val sPortReq = Bool
-    val sPortData = cfg.TData
+    val sPortAddr  = cfg.TWAddr
+    val sPortReq   = Bool
+    val sPortData  = cfg.TData
     val sPortError = Bool
     val sPortGrant = Bool
 
@@ -233,13 +233,22 @@ class AxiMemInterface(val cfg : AxiConfig,
     val sGenActive = Bool
     val sGenAddr  = cfg.TWAddr
     val sGenMask  = cfg.TMask
-    val sGenStep  = Bool
+    val sGenFirst  = Bool
+    val sGenBeg  = Bool
+    val sGenEnd  = Bool
     val sGenLast  = Bool
     val sGenError = Bool
     val sGenNext  = Bool
 
-    /// Write Address Channel ///
-    val rId    = cfg.hasId generate RegNextWhen(io.sAxi.aw.id, io.sAxi.aw.valid && !sGenActive)
+    val sWriteClear = Bool
+    val sWriteUse = Bool
+    val sWriteMerge = Bool
+    val sWriteSend = Bool
+    val sWriteHold = Bool
+    val sWriteError = Bool
+
+    /// Address Generator: Axi AW --> Gen* ///
+    val rGenId = cfg.hasId generate RegNextWhen(io.sAxi.aw.id, io.sAxi.aw.valid && !sGenActive)
 
     val iAddrGen = if (cfg.hasBurst) new Area {
       val iSequencer = new AxiSequencer(cfg)
@@ -252,7 +261,8 @@ class AxiMemInterface(val cfg : AxiConfig,
       sGenActive := iSequencer.io.oActive
       sGenAddr  := iSequencer.io.oWAddr
       sGenMask  := iSequencer.io.oMask
-      sGenStep  := iSequencer.io.oEnd
+      sGenBeg  := iSequencer.io.oEnd
+      sGenEnd  := iSequencer.io.oEnd
       sGenLast  := iSequencer.io.oLast
       sGenError := iSequencer.io.oError
       iSequencer.io.iNext := sGenNext
@@ -270,48 +280,178 @@ class AxiMemInterface(val cfg : AxiConfig,
       sGenActive := rActive
       sGenAddr := rAddr
       sGenMask := cfg.cMaskAll
-      sGenStep := True
+      sGenBeg := True
+      sGenEnd := True
       sGenLast := True
       sGenError := False
     }
 
-    /// Write Data Channel ///
-    // TODO-lw implement
-    SpinalError("AxiMemInterface Write Channel not implemented yet!")
-    io.sAxi.w.ready := sGenActive
+    /* sGenAddr
+     * sGenMask
+     * sGenFirst
+     * sGenBeg
+     * sGenEnd
+     * sGenLast
+     * sGenError
+     * sGenActive
+     *             sGenNext
+     */
 
-    val rData = Reg(cfg.TData)
-    val rMask = Reg(cfg.TMask)
 
-    when (io.sAxi.aw.valid && !sGenActive) {
-      rData := 0
-      rMask := 0
+    /// Data Path: Axi W --> Port ///
+    val sAxiData = cfg.TData
+    val sAxiMask = cfg.TMask
+    val sAxiLast = Bool
+    val sAxiValid = Bool
+    val sAxiReady = Bool
+
+    val rPortData = Reg(cfg.TData)
+    val rPortMask = Reg(cfg.TMask)
+    val rPortAddr = Reg(cfg.TWAddr)
+    val rPortReq = Reg(Bool)
+
+    sAxiData := io.sAxi.w.data
+    sAxiMask := (if (cfg.hasStrb) {
+      io.sAxi.w.strb
+    } else {
+      cfg.cMaskAll
+    })
+    sAxiLast := (if (cfg.hasBurst) {
+      io.sAxi.w.last
+    } else {
+      True
+    })
+    sAxiValid := io.sAxi.w.valid
+    io.sAxi.w.ready := sAxiReady
+
+    sWriteHold := True
+    when (!rPortReq || sPortGrant) {
+      sWriteHold := False
+      when (sWriteClear) {
+        rPortData := 0
+        rPortMask := cfg.cMaskNone
+      } elsewhen (sWriteUse) {
+        when (sWriteMerge) {
+          rPortData := MaskMux(sGenMask, sAxiData, rPortData)
+          rPortMask := MaskMux(sGenMask, sAxiMask, rPortMask)
+        } otherwise {
+          rPortData := MaskMux(sGenMask, sAxiData, 0)
+          rPortMask := MaskMux(sGenMask, sAxiMask, 0)
+        }
+      }
+      when (sWriteSend) {
+        rPortAddr := sGenAddr
+        rPortReq := True
+      } otherwise {
+        rPortReq := False
+      }
     }
-    //io.sAxi.w.data
-    //io.sAxi.w.strb ?hasStrb
-    //io.sAxi.w.last ?hasBurst
-    sPortAddr := sGenAddr
-    sPortData := 0
-    sPortMask := 0
-    sPortReq := False
-    // sPortGrant
-    // sPortError
-    sGenNext := False
-    // sGenAddr
-    // sGenActive
-    // sGenMask
-    // sGenStep
-    // sGenLast
-    // sGenError
+    sWriteError  := sPortError && sPortGrant && rPortReq
 
-    /// Write Response Channel ///
-    // TODO-lw
-    io.sAxi.b.resp := cfg.cRespOkay
+    sPortAddr := rPortAddr
+    sPortData := rPortData
+    sPortMask := rPortMask
+    sPortReq  := rPortReq
+
+
+    /* sAxiLast
+     * sAxiValid
+     *              sAxiReady
+     *              sWriteClear
+     *              sWriteUse
+     *              sWriteMerge
+     *              sWriteSend
+     * sWriteHold
+     * sWriteError
+     */
+
+
+    /// Write Core Logic: * --> Axi B ///
+    val sError = Bool
+
+    val rRspId = cfg.hasId generate RegNextWhen(rGenId, sGenActive)
+    val rRspError = Reg(Bool)
+    val rRspValid = Reg(Bool)
+
+    val sRspSend = Bool
+    val sRspHold = Bool
+
+    sRspHold := True
+    when (!rRspValid || io.sAxi.b.ready) {
+      sRspHold := False
+      when (sRspSend) {
+        rRspError := sError
+        rRspValid := True
+      } otherwise {
+        rRspValid := False
+      }
+    }
+    io.sAxi.b.resp := Mux(rRspError, cfg.cRespSlvErr, cfg.cRespOkay)
     if (cfg.hasId) {
-      io.sAxi.b.id := rId
+      io.sAxi.b.id := rRspId
     }
-    io.sAxi.b.valid := False
-    // io.sAxi.b.ready
+    io.sAxi.b.valid := rRspValid
+
+
+    val rError = Reg(Bool)
+    val sFrameError = Bool
+    val sErrorUse = Bool
+    val sErrorMerge = Bool
+
+    when (sErrorUse) {
+      when (sErrorMerge) {
+        sError := sWriteError || sGenError || sFrameError || rError
+      } otherwise {
+        sError := sWriteError || sGenError || sFrameError
+      }
+      rError := sError
+    } otherwise {
+      sError := rError
+    }
+
+    /* sFrameError
+     * sErrorUse
+     * sErrorMerge
+     */
+
+
+    val iFsm = new StateMachine {
+      // sGenFirst
+      // sGenBeg
+      // sGenEnd
+      // sGenLast
+      // sGenError
+      // sGenActive
+      sGenNext := False
+
+      // sAxiLast
+      // sAxiValid
+      sAxiReady := False
+      sWriteClear := False
+      sWriteUse := False
+      sWriteMerge := False
+      sWriteSend := False
+      // sWriteHold
+
+      sRspSend := False
+      // sRspHold
+
+      sFrameError := False
+      sErrorUse := False
+      sErrorMerge := False
+
+      val Normal : State = new State with EntryPoint { whenIsActive {
+        sAxiReady := sGenActive && !sWriteHold
+      } }
+      val GenDrain : State = new State with EntryPoint { whenIsActive {
+        sAxiReady := sGenActive
+        when (sGenActive & sAxiValid) {
+        }
+      } }
+
+      val Error : State = new State { whenIsActive {
+      } }
+    }
 
   }
 
@@ -401,6 +541,36 @@ object AxiMemInterface extends HwMain[AxiMemInterface] {
     val tC = iAxiRd.readOn(0xC, 0x210, 5, Size.S16B, Burst.Incr)
     val tD = iAxiRd.readOn(0xD, 0xFF0, 50, Size.S4B, Burst.Incr) // cross 4K boundary to simulate error
     val tE = iAxiRd.readOn(0xE, 0x0C0, 256, Size.S4B, Burst.Incr)
+    tA.blockValue()
+    tB.blockValue()
+    tC.blockValue()
+    tD.blockValue()
+    tE.blockValue()
+
+    env.waitFor(108)
+  }
+
+  simSuiteWith("WriteOnly")(new AxiMemInterface(AxiConfig(addrBits=16, dataBytes=16, idBits=4), denyRead=true))
+  simSuiteRun("WriteOnly") { dut =>
+    implicit val env = new ClockEnv(dut.clockDomain)
+    env.timeout(65536)
+    env.onRawCycle(2) { () =>
+     env.setRst(false)
+    }
+
+    val iMemory = new MemoryModel(dataBits = dut.cfg.dataBits)
+    iMemory.connect(dut.io.mPortRd, delayGen = Random.between(0, 4), errorGen = Random.nextDouble() < 0.0)
+
+    val axiModelCfg = AxiModelConfig(dataRate=RateGen(0.6))
+    val iAxiRd = new AxiWrMaster(dut.io.sAxi, axiModelCfg)
+
+    env.waitFor()
+
+    val tA = iAxiRd.writeOn(0xA, 0xC000, BigInt("A7A6A5A4A3A2A1A0B7B6B5B4B3B2B1"), 16, Size.S8B, Burst.Wrap)
+    val tB = iAxiRd.writeOn(0xB, 0xC004, BigInt("D3D2D1D0"))
+    val tC = iAxiRd.writeOn(0xC, 0x210, 0x6c06c, 5, Size.S16B, Burst.Incr)
+    val tD = iAxiRd.writeOn(0xD, 0xFF0, 0x6c06c, 50, Size.S4B, Burst.Incr) // cross 4K boundary to simulate error
+    val tE = iAxiRd.writeOn(0xE, 0x0C0, 0x6c06c, 256, Size.S4B, Burst.Incr)
     tA.blockValue()
     tB.blockValue()
     tC.blockValue()

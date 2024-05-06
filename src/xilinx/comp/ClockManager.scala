@@ -6,7 +6,7 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.core.internals._
 
-import hwlib.xilinx.blackbox.{ClkManPrimitive, Part, ClkBufGlobal, ClockSpec, Pll2Base, Mmcm2Base, ClockOptTarget, ClkManCfg, ClkBufPrimitive, CdcAsyncReset}
+import hwlib.xilinx.blackbox.{ClkManPrimitive, Part, ClkBufGlobal, ClockSpec, Pll2Base, Mmcm2Base, ClockOptTarget, ClkManCfg, ClkBufPrimitive, CdcReset, CdcResetConfig}
 
 
 
@@ -53,11 +53,11 @@ class ClockManager(part : Part, specs : Map[String, ClockSpec], usePll : Boolean
 
   val iOutLogic = for (idx <- 0 until outCount) yield {
     val sClk = iClkMan.io.find(s"CLKOUT${idx}").asInstanceOf[Bool]
-    val iRstSync = new CdcAsyncReset(activeHigh = true)
-    iRstSync.io.src_arst := sReset
+    val iRstSync = new CdcReset(CdcResetConfig(async = true, activeHigh = true))
+    iRstSync.io.src_rst := sReset
     iRstSync.io.dest_clk := sClk
     io.oClk(idx) := sClk
-    io.oRst(idx) := iRstSync.io.dest_arst
+    io.oRst(idx) := iRstSync.io.dest_rst
   }
 
   val clockDomains = param.mapping.map(e =>

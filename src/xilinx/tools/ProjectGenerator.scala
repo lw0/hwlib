@@ -80,6 +80,7 @@ class ProjectGenerator[T <: Component](val report : SpinalReport[T], val board :
     }
 
     buf ++= s"\n### Setup Toplevel\n"
+    buf ++= s"auto_detect_xpm\n"
     buf ++= s"update_compile_order -fileset [current_fileset]\n"
     buf ++= s"set_property top ${toplevelName} [current_fileset]\n"
 
@@ -89,7 +90,6 @@ class ProjectGenerator[T <: Component](val report : SpinalReport[T], val board :
     buf ++= s"set project_name ${projectName}_proj\n"
     buf ++= s"set project_dir [lindex $$argv 0]\n"
     buf ++= s"open_project $$project_dir/$$project_name\n"
-    buf ++= s"auto_detect_xpm\n"
     // TODO-lw make configurable
     buf ++= s"set_property strategy Performance_Auto_1 [get_runs impl_1]\n"
     buf ++= s"launch_runs impl_1 -to_step write_bitstream -jobs 4\n"

@@ -59,6 +59,25 @@ object Mask {
   def RangeZerosS(offset : UInt, length : UInt, width : Int) : SInt = RangeZeros(offset, length, width).asSInt
 }
 
+object MaskMux {
+  def apply(mask : Bits, sel1 : Bits, sel0 : Bits) = new Composite(mask) {
+    val width = widthOf(sel1)
+    val width0 = widthOf(sel0)
+    require(width == width0)
+    val count = widthOf(mask)
+    require(width % count == 0)
+    val unit = width / count
+
+    val units1 = sel1.subdivideIn(unit bits)
+    val units0 = sel0.subdivideIn(unit bits)
+    val result = Vec.fill(count)(Bits(unit bits))
+    for (i <- 0 until count) {
+      result(i) := Mux(mask(i), units1(i), units0(i))
+    }
+  }.result.asBits
+
+}
+
 object HexString {
   def apply(num : BigInt, unit : Int = 2, group : Int = 0, unitSep : String = " ", groupSep : String = "  ") = {
     val str = num.toString(16)
@@ -71,3 +90,4 @@ object HexString {
   }
 
 }
+
